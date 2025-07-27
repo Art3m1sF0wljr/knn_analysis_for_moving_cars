@@ -101,7 +101,7 @@ def upload_to_youtube(youtube, file_path, title, description):
     body = {
         'snippet': {
             'title': title,
-            'description': description,
+            'description': "tbd",
             'tags': ['motion', 'security', 'timelapse'],
             'categoryId': '22'  # See https://developers.google.com/youtube/v3/docs/videoCategories/list
         },
