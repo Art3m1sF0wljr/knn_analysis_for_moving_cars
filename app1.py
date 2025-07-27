@@ -149,7 +149,7 @@ def main():
         processed_files.append(output_path)
     
     # Save titles to text file
-    with open(TEXT_FILE, 'w') as f:
+    with open(TEXT_FILE, 'a') as f:
         f.write("\n".join(titles))
     
     # Generate output filename with timestamp
