@@ -5,6 +5,8 @@ import datetime
 import os
 from collections import deque
 import subprocess
+import time
+import sys
 
 class MotionAnalyzer:
     def __init__(self):
@@ -127,89 +129,94 @@ def save_video_clip(frames, fps, output_dir, timestamp):
 
 def main():
     # Configuration
-    youtube_url = "https://www.youtube.com/watch?v=YMvfvIYEnrQ"
+    youtube_url = "https://www.youtube.com/watch?v=asdasdasdas"
     output_directory = "motion_clips"
     frame_buffer_size = 5  # Number of frames to keep in buffer
+    restart_delay = 1
     
-    # Initialize
-    cap = get_youtube_stream(youtube_url)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    analyzer = MotionAnalyzer()
-    frame_buffer = deque(maxlen=int(fps * analyzer.clip_before))
-    
-    print(f"Starting stream analysis at {datetime.datetime.now()}")
-    print(f"Stream FPS: {fps}")
-    
-    try:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                print("Stream ended or connection lost")
-                break
-            
-            current_time = datetime.datetime.now()
-            
-            # Store frame in buffer
-            frame_buffer.append(frame.copy())
-            
-            # Detect motion
-            has_motion = analyzer.detect_significant_motion(frame)
-            
-            if has_motion:
-                if not analyzer.is_recording:
-                    # Start new clip
-                    analyzer.is_recording = True
-                    analyzer.clip_start_time = current_time
-                    analyzer.clip_frames = list(frame_buffer)  # Include pre-motion frames
-                    print(f"Motion detected at {current_time}")
-                
-                # Add current frame to clip
-                analyzer.clip_frames.append(frame.copy())
-                analyzer.last_motion_time = current_time
-            else:
-                if analyzer.is_recording:
-                    # Add current frame to clip (continue briefly after motion stops)
-                    analyzer.clip_frames.append(frame.copy())
-                    
-                    # Check if we should end the clip
-                    if (current_time - analyzer.last_motion_time).total_seconds() > analyzer.clip_after:
-                        # Save clip if it meets minimum length
-                        clip_length = (current_time - analyzer.clip_start_time).total_seconds()
-                        if clip_length >= analyzer.min_clip_length:
-                            save_video_clip(
-                                analyzer.clip_frames,
-                                fps,
-                                output_directory,
-                                analyzer.clip_start_time
-                            )
-                            print(f"Saved clip: {clip_length:.2f} seconds")
-                        
-                        # Reset recording state
-                        analyzer.is_recording = False
-                        analyzer.clip_frames = []
-            
-            # Display preview (optional)
-            #cv2.imshow('Stream Preview', frame)
-            #if cv2.waitKey(1) & 0xFF == ord('q'):
-            #    break
-                
-    except KeyboardInterrupt:
-        print("Stopping analysis...")
-    finally:
-        cap.release()
-        #cv2.destroyAllWindows()
+    while True:
+        # Initialize
+        cap = get_youtube_stream(youtube_url)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        analyzer = MotionAnalyzer()
+        frame_buffer = deque(maxlen=int(fps * analyzer.clip_before))
         
-        # Save any pending clip when stopping
-        if analyzer.is_recording and analyzer.clip_frames:
-            clip_length = (datetime.datetime.now() - analyzer.clip_start_time).total_seconds()
-            if clip_length >= analyzer.min_clip_length:
-                save_video_clip(
-                    analyzer.clip_frames,
-                    fps,
-                    output_directory,
-                    analyzer.clip_start_time
-                )
-                print(f"Saved final clip: {clip_length:.2f} seconds")
+        print(f"Starting stream analysis at {datetime.datetime.now()}")
+        print(f"Stream FPS: {fps}")
+        
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    print("Stream ended or connection lost")
+                    break
+            
+                current_time = datetime.datetime.now()
+            
+                # Store frame in buffer
+                frame_buffer.append(frame.copy())
+            
+                # Detect motion
+                has_motion = analyzer.detect_significant_motion(frame)
+                
+                if has_motion:
+                    if not analyzer.is_recording:
+                        # Start new clip
+                        analyzer.is_recording = True
+                        analyzer.clip_start_time = current_time
+                        analyzer.clip_frames = list(frame_buffer)  # Include pre-motion frames
+                        print(f"Motion detected at {current_time}")
+                
+                    # Add current frame to clip
+                    analyzer.clip_frames.append(frame.copy())
+                    analyzer.last_motion_time = current_time
+                else:
+                    if analyzer.is_recording:
+                        # Add current frame to clip (continue briefly after motion stops)
+                        analyzer.clip_frames.append(frame.copy())
+                    
+                        # Check if we should end the clip
+                        if (current_time - analyzer.last_motion_time).total_seconds() > analyzer.clip_after:
+                            # Save clip if it meets minimum length
+                            clip_length = (current_time - analyzer.clip_start_time).total_seconds()
+                            if clip_length >= analyzer.min_clip_length:
+                                save_video_clip(
+                                    analyzer.clip_frames,
+                                    fps,
+                                    output_directory,
+                                    analyzer.clip_start_time
+                                )
+                                print(f"Saved clip: {clip_length:.2f} seconds")
+                        
+                            # Reset recording state
+                            analyzer.is_recording = False
+                            analyzer.clip_frames = []
+            
+                # Display preview (optional)
+                #cv2.imshow('Stream Preview', frame)
+                #if cv2.waitKey(1) & 0xFF == ord('q'):
+                #    break
+                
+        except KeyboardInterrupt:
+            print("Stopping analysis...")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error: {str(e)}", file=sys.stderr)
+        finally:
+            cap.release()
+            #cv2.destroyAllWindows()
+        
+            # Save any pending clip when stopping
+            if analyzer.is_recording and analyzer.clip_frames:
+                clip_length = (datetime.datetime.now() - analyzer.clip_start_time).total_seconds()
+                if clip_length >= analyzer.min_clip_length:
+                    save_video_clip(
+                        analyzer.clip_frames,
+                        fps,
+                        output_directory,
+                        analyzer.clip_start_time
+                    )
+                    print(f"Saved final clip: {clip_length:.2f} seconds")
 
 if __name__ == "__main__":
     main()
