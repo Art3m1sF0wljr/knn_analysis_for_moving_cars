@@ -93,8 +93,8 @@ def get_youtube_stream(url, resolution='720p'):
     except Exception as e:
         # Check if it's a fatal error (like the authentication error)
         if "Sign in to confirm you're not a bot" in str(e) or isinstance(e, yt_dlp.utils.DownloadError):
-            print("Fatal error encountered. Restarting program in 40 seconds...")
-            time.sleep(40)
+            print("Fatal error encountered. Restarting program in 10 seconds...")
+            time.sleep(10)
             os.execl(sys.executable, sys.executable, *sys.argv)
         # For other errors, re-raise them
         raise
