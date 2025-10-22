@@ -1,7 +1,8 @@
 import threading
 import time
 import logging
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, request, redirect, url_for
+from functools import wraps
 import socket
 import collections
 from typing import Dict, Set
@@ -13,13 +14,53 @@ import subprocess
 import sys
 import av
 import io
-
+import hashlib
+import secrets
+import bcrypt
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(16)  # Required for session management
+
+class ReverseProxied:
+    def __init__(self, app, script_name=None):
+        self.app = app
+        self.script_name = script_name
+
+    def __call__(self, environ, start_response):
+        script_name = self.script_name or os.environ.get('SCRIPT_NAME', '')
+        if script_name:
+            environ['SCRIPT_NAME'] = script_name
+            path_info = environ['PATH_INFO']
+            if path_info.startswith(script_name):
+                environ['PATH_INFO'] = path_info[len(script_name):]
+        return self.app(environ, start_response)
+
+app.wsgi_app = ReverseProxied(app.wsgi_app, script_name='/surveillance')
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+# Authentication Configuration
+AUTH_CONFIG = {
+    'enabled': True,  # Set to False to disable authentication
+    'users': {
+        'admin': {
+            # Password: '' - will be hashed on first run
+            'password_hash': None,  # Will be set automatically
+            'role': 'admin'
+        },
+        'user': {
+            # Password: '' - will be hashed on first run  
+            'password_hash': None,  # Will be set automatically
+            'role': 'user'
+        }
+    },
+    'session_timeout': 3600  # 1 hour in seconds
+}
+
 
 # Configuration
 CONFIG = {
@@ -39,13 +80,124 @@ CONFIG = {
 # Global variables for stream management
 stream_managers: Dict[str, 'StreamManager'] = {}
 
-# HTML template for the streaming page
+# Simple session storage (in production, use Redis or database)
+sessions = {}
+
+# HTML template for login page
+LOGIN_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login - Camera Streams</title>
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .login-container {
+            background: #2d2d2d;
+            border-radius: 10px;
+            padding: 40px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            width: 300px;
+        }
+        .login-title {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #444;
+            border-radius: 4px;
+            background: #1a1a1a;
+            color: white;
+            box-sizing: border-box;
+        }
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            border-color: #4CAF50;
+            outline: none;
+        }
+        .login-button {
+            width: 100%;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .login-button:hover {
+            background: #45a049;
+        }
+        .error-message {
+            color: #f44336;
+            text-align: center;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .auth-toggle {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-title">Camera Streams Login</div>
+        <form method="POST" action="/surveillance/login">
+            <div class="form-group">
+                <label for="username">Username:</label>
+                <input type="text" id="username" name="username" required>
+            </div>
+            <div class="form-group">
+                <label for="password">Password:</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+            <input type="hidden" name="next" value="{{ next_url }}">
+            <button type="submit" class="login-button">Login</button>
+            {% if error %}
+            <div class="error-message">{{ error }}</div>
+            {% endif %}
+        </form>
+        <div class="auth-toggle">
+            Authentication: {{ "Enabled" if auth_enabled else "Disabled" }}
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+# HTML template for the streaming page (your existing template)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
     <title>H264 Multi-Stream Viewer</title>
     <style>
+        /* Your existing CSS styles here */
         body { 
             margin: 20px; 
             font-family: Arial, sans-serif;
@@ -204,10 +356,44 @@ HTML_TEMPLATE = '''
         .refresh-button:hover {
             background: #cc0000;
         }
+        /* Header styles */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #444;
+        }
+        .user-info {
+            font-size: 14px;
+            color: #888;
+        }
+        .logout-button {
+            background: #f44336;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .logout-button:hover {
+            background: #d32f2f;
+        }
     </style>
 </head>
 <body>
-    <h1>Live Camera Stream Viewer</h1>
+    <div class="header">
+        <h1>Live Camera Stream Viewer</h1>
+        <div class="user-info">
+            Logged in as: {{ username }} 
+            <a href="/surveillance/change-password" class="logout-button">Change Password</a>
+            <a href="/surveillance/logout" class="logout-button">Logout</a>
+        </div>
+    </div>
     <div class="container">
         {% for stream_id, stream_config in config.streams.items() %}
         <div class="stream-container">
@@ -245,6 +431,7 @@ HTML_TEMPLATE = '''
     </div>
 
     <script>
+        // Your existing JavaScript code here
         // Store current stream types for each video
         const streamTypes = {};
         
@@ -257,13 +444,13 @@ HTML_TEMPLATE = '''
             // Load YouTube links when page loads
             loadYouTubeLinks();
         }
-        
+        const basePath = '/surveillance'; 
         function initializeStream(streamId, streamType) {
             const img = document.getElementById('video-' + streamId);
             const status = document.getElementById('status-' + streamId);
             
             // Always use MJPEG for compatibility
-            const streamUrl = '/mjpg_feed/' + streamId;
+            const streamUrl = basePath + '/mjpg_feed/' + streamId;
             
             // Set image source for MJPEG stream
             img.src = streamUrl;
@@ -326,7 +513,7 @@ HTML_TEMPLATE = '''
                 }
                 
                 // Update client count
-                fetch('/api/streams/' + streamId + '/clients')
+                fetch(basePath + '/api/streams/' + streamId + '/clients')
                     .then(response => {
                         if (!response.ok) {
                             throw new Error('Network response was not ok');
@@ -347,7 +534,7 @@ HTML_TEMPLATE = '''
                 
                 // Update motion status if motion detection is enabled
                 if (motion) {
-                    fetch('/api/streams/' + streamId + '/motion')
+                    fetch(basePath + '/api/streams/' + streamId + '/motion')
                         .then(response => {
                             if (!response.ok) {
                                 throw new Error('Network response was not ok');
@@ -374,7 +561,7 @@ HTML_TEMPLATE = '''
             const linksBox = document.getElementById('youtube-links-box');
             linksBox.innerHTML = '<div class="no-links">Loading YouTube links...</div>';
             
-            fetch('/api/youtube-links')
+            fetch(basePath + '/api/youtube-links')
                 .then(response => {
                     if (!response.ok) {
                         throw new Error('Network response was not ok');
@@ -449,6 +636,205 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
+# Authentication functions
+
+def initialize_passwords():
+    """Hash and store passwords on first run"""
+    default_passwords = {
+        'admin': '',
+        'user': ''
+    }
+    
+    for username, user_config in AUTH_CONFIG['users'].items():
+        if user_config['password_hash'] is None:
+            password = default_passwords[username]
+            password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+            user_config['password_hash'] = password_hash
+            logger.info(f"Initialized password for user: {username}")
+            
+def hash_password(password):
+    """Hash a password using bcrypt"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+
+def verify_password(username, password):
+    """Verify username and password using bcrypt"""
+    if not AUTH_CONFIG['enabled']:
+        return True
+    
+    if username in AUTH_CONFIG['users']:
+        stored_hash = AUTH_CONFIG['users'][username]['password_hash']
+        if stored_hash:  # Only verify if password is set
+            # bcrypt.checkpw expects bytes
+            if isinstance(stored_hash, str):
+                stored_hash = stored_hash.encode('utf-8')
+            return bcrypt.checkpw(password.encode('utf-8'), stored_hash)
+    
+    return False
+
+def change_password(username, new_password):
+    """Change a user's password"""
+    if username in AUTH_CONFIG['users']:
+        password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+        AUTH_CONFIG['users'][username]['password_hash'] = password_hash
+        logger.info(f"Password changed for user: {username}")
+        return True
+    return False
+    
+def create_session(username):
+    """Create a new session for the user"""
+    session_id = secrets.token_urlsafe(32)
+    sessions[session_id] = {
+        'username': username,
+        'role': AUTH_CONFIG['users'][username]['role'],
+        'created_at': time.time()
+    }
+    return session_id
+
+def get_session(session_id):
+    """Get session data and validate timeout"""
+    if session_id in sessions:
+        session = sessions[session_id]
+        if time.time() - session['created_at'] < AUTH_CONFIG['session_timeout']:
+            return session
+        else:
+            # Session expired
+            del sessions[session_id]
+    return None
+
+def login_required(f):
+    """Decorator to require authentication for routes"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not AUTH_CONFIG['enabled']:
+            return f(*args, **kwargs)
+        
+        session_id = request.cookies.get('session_id')
+        session = get_session(session_id) if session_id else None
+        
+        if not session:
+            # Redirect to login page with next parameter
+            next_url = request.url
+            return redirect(url_for('login', next=next_url))
+        
+        # Add user info to request context for templates
+        request.user = session
+        return f(*args, **kwargs)
+    
+    return decorated_function
+
+# Authentication routes
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login page"""
+    if not AUTH_CONFIG['enabled']:
+        return redirect(url_for('index'))
+    
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        next_url = request.form.get('next', url_for('index'))
+        
+        if verify_password(username, password):
+            session_id = create_session(username)
+            response = redirect(next_url)
+            response.set_cookie('session_id', session_id, httponly=True, max_age=AUTH_CONFIG['session_timeout'])
+            logger.info(f"User {username} logged in successfully")
+            return response
+        else:
+            logger.warning(f"Failed login attempt for username: {username}")
+            return render_template_string(LOGIN_TEMPLATE, 
+                                       error="Invalid username or password",
+                                       auth_enabled=AUTH_CONFIG['enabled'],
+                                       next_url=next_url)
+    
+    # GET request - show login form
+    next_url = request.args.get('next', url_for('index'))
+    return render_template_string(LOGIN_TEMPLATE, 
+                               error=None,
+                               auth_enabled=AUTH_CONFIG['enabled'],
+                               next_url=next_url)
+
+@app.route('/logout')
+def logout():
+    """Logout user"""
+    session_id = request.cookies.get('session_id')
+    if session_id in sessions:
+        username = sessions[session_id]['username']
+        del sessions[session_id]
+        logger.info(f"User {username} logged out")
+    
+    response = redirect(url_for('login'))
+    response.set_cookie('session_id', '', expires=0)
+    return response
+
+
+@app.route('/change-password', methods=['GET', 'POST'])
+@login_required
+def change_password_route():
+    """Allow users to change their password"""
+    if request.method == 'POST':
+        current_password = request.form.get('current_password')
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
+        
+        username = request.user['username']
+        
+        # Verify current password
+        if not verify_password(username, current_password):
+            return render_template_string('''
+                <h1>Change Password</h1>
+                <form method="POST">
+                    <div>Current Password: <input type="password" name="current_password" required></div>
+                    <div>New Password: <input type="password" name="new_password" required></div>
+                    <div>Confirm Password: <input type="password" name="confirm_password" required></div>
+                    <div style="color: red;">Current password is incorrect</div>
+                    <button type="submit">Change Password</button>
+                </form>
+                <a href="/">Back to Streams</a>
+            ''')
+        
+        # Check if new passwords match
+        if new_password != confirm_password:
+            return render_template_string('''
+                <h1>Change Password</h1>
+                <form method="POST">
+                    <div>Current Password: <input type="password" name="current_password" required></div>
+                    <div>New Password: <input type="password" name="new_password" required></div>
+                    <div>Confirm Password: <input type="password" name="confirm_password" required></div>
+                    <div style="color: red;">New passwords do not match</div>
+                    <button type="submit">Change Password</button>
+                </form>
+                <a href="/">Back to Streams</a>
+            ''')
+        
+        # Change the password
+        if change_password(username, new_password):
+            return '''
+                <h1>Password Changed Successfully</h1>
+                <p>Your password has been updated.</p>
+                <a href="/">Back to Streams</a>
+            '''
+        else:
+            return '''
+                <h1>Error</h1>
+                <p>Failed to change password.</p>
+                <a href="/">Back to Streams</a>
+            '''
+    
+    # GET request - show change password form
+    return render_template_string('''
+        <h1>Change Password</h1>
+        <form method="POST">
+            <div>Current Password: <input type="password" name="current_password" required></div>
+            <div>New Password: <input type="password" name="new_password" required></div>
+            <div>Confirm Password: <input type="password" name="confirm_password" required></div>
+            <button type="submit">Change Password</button>
+        </form>
+        <a href="/">Back to Streams</a>
+    ''')
+    
+    
+# Your existing classes (StreamClient, MotionAnalyzer, StreamManager) remain the same
 class StreamClient:
     """Represents a client consuming the stream"""
     def __init__(self):
@@ -895,12 +1281,14 @@ def generate_h264_frames(stream_manager: StreamManager):
         # Always remove client when done
         stream_manager.remove_client(client)
 
-# Flask routes
+# Flask routes - all protected with @login_required
 @app.route('/')
+@login_required
 def index():
-    return render_template_string(HTML_TEMPLATE, config=CONFIG)
+    return render_template_string(HTML_TEMPLATE, config=CONFIG, username=request.user['username'])
     
 @app.route('/api/youtube-links', methods=['GET'])
+@login_required
 def get_youtube_links():
     """Get the list of YouTube links from list.txt"""
     try:
@@ -916,6 +1304,7 @@ def get_youtube_links():
         return {'links': []}
 
 @app.route('/h264_feed/<stream_id>')
+@login_required
 def h264_feed(stream_id):
     """
     Alternative H264 feed - actually serves MJPEG for compatibility
@@ -971,6 +1360,7 @@ def h264_feed_old(stream_id):
 
 
 @app.route('/mp4_feed/<stream_id>')
+@login_required
 def mp4_feed(stream_id):
     """
     Stream as fragmented MP4 for better browser support
@@ -1051,9 +1441,10 @@ def mp4_feed(stream_id):
     )
     
 @app.route('/mjpg_feed/<stream_id>')
+@login_required
 def mjpg_feed(stream_id):
     """
-    Stream as MJPEG - most compatible with browsers
+    Stream as MJPEG - Chrome compatible version
     """
     if stream_id not in stream_managers:
         return "Stream not found", 404
@@ -1061,25 +1452,24 @@ def mjpg_feed(stream_id):
     stream_manager = stream_managers[stream_id]
     
     def generate_mjpg():
-        """Generate proper MJPEG stream with boundaries"""
+        """Generate proper MJPEG stream with boundaries - Chrome compatible"""
         client = stream_manager.add_client()
         
         try:
-            logger.info(f"[{stream_manager.stream_id}] Starting MJPEG stream for client")
+            logger.info(f"[{stream_manager.stream_id}] Starting MJPEG stream for Chrome client")
             
             # Define multipart boundary
             boundary = 'frame'
             
             # Send initial content type header
-            yield (f'Content-Type: multipart/x-mixed-replace; boundary={boundary}\r\n\r\n').encode()
+            yield (f'--{boundary}\r\n').encode()
             
             # Send any buffered frame first
             if stream_manager.last_frame:
-                yield (f'--{boundary}\r\n'
-                       f'Content-Type: image/jpeg\r\n'
+                yield (f'Content-Type: image/jpeg\r\n'
                        f'Content-Length: {len(stream_manager.last_frame)}\r\n'
                        f'\r\n').encode() + stream_manager.last_frame + b'\r\n'
-                yield b'--frame\r\n'
+                yield (f'--{boundary}\r\n').encode()
             
             # Stream new frames as they arrive
             for frame_bytes in client.get_frames():
@@ -1087,12 +1477,12 @@ def mjpg_feed(stream_id):
                                  f'Content-Length: {len(frame_bytes)}\r\n'
                                  f'\r\n').encode() + frame_bytes + b'\r\n'
                 yield multipart_data
-                yield b'--frame\r\n'
+                yield (f'--{boundary}\r\n').encode()
                 
         except GeneratorExit:
-            logger.info(f"[{stream_manager.stream_id}] Client disconnected (generator exit)")
+            logger.info(f"[{stream_manager.stream_id}] Chrome client disconnected (generator exit)")
         except Exception as e:
-            logger.error(f"[{stream_manager.stream_id}] MJPEG generation error: {e}")
+            logger.error(f"[{stream_manager.stream_id}] MJPEG generation error for Chrome: {e}")
         finally:
             # Always remove client when done
             stream_manager.remove_client(client)
@@ -1101,18 +1491,21 @@ def mjpg_feed(stream_id):
         generate_mjpg(),
         mimetype='multipart/x-mixed-replace; boundary=frame',
         headers={
-            'Cache-Control': 'no-cache, private',
+            'Cache-Control': 'no-cache, private, no-store, must-revalidate, max-age=0',
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
-            'Pragma': 'no-cache'
+            'Pragma': 'no-cache',
+            'Expires': '0'
         }
     )
     
 @app.route('/api/streams', methods=['GET'])
+@login_required
 def list_streams():
     return {'streams': CONFIG['streams']}
 
 @app.route('/api/streams/<stream_id>/clients', methods=['GET'])
+@login_required
 def get_client_count(stream_id):
     """Get number of connected clients for a stream"""
     if stream_id not in stream_managers:
@@ -1122,6 +1515,7 @@ def get_client_count(stream_id):
     return {'client_count': client_count}
 
 @app.route('/api/streams/<stream_id>/motion', methods=['GET'])
+@login_required
 def get_motion_status(stream_id):
     """Get motion detection status for a stream"""
     if stream_id not in stream_managers:
@@ -1131,11 +1525,13 @@ def get_motion_status(stream_id):
     return {'motion_detected': motion_detected}
 
 @app.route('/api/streams/add', methods=['POST'])
+@login_required
 def api_add_stream():
     # Implementation for dynamic stream addition via API
     pass
 
 @app.route('/api/streams/<stream_id>/remove', methods=['POST'])
+@login_required
 def api_remove_stream(stream_id):
     if stream_id in stream_managers:
         stream_managers[stream_id].stop()
@@ -1198,6 +1594,7 @@ def initialize_streams():
             logger.info(f"Initialized stream: {stream_id} (motion detection: {motion_detection})")
 
 if __name__ == '__main__':
+    initialize_passwords()
     initialize_streams()
     
     # Add more streams easily like this:
@@ -1205,4 +1602,9 @@ if __name__ == '__main__':
     # add_stream('stream3', '192.168.8.213', 42069, 'Garage Camera', motion_detection=False)
     
     logger.info("Starting H264 Flask streaming server on http://0.0.0.0:42069")
-    app.run(host='0.0.0.0', port=42069, threaded=True)
+    logger.info(f"Authentication: {'ENABLED' if AUTH_CONFIG['enabled'] else 'DISABLED'}")
+    if AUTH_CONFIG['enabled']:
+        logger.info("Default users: admin/same as switch, user/pw")
+        logger.info("CHANGE DEFAULT PASSWORDS IN PRODUCTION!")
+    
+    app.run(host='127.0.0.1', port=42069, threaded=True)
