@@ -25,7 +25,7 @@ app = Flask(__name__)
 CONFIG = {
     'streams': {
         'stream1': {
-            'host': '192.168.8.123',
+            'host': '192.168.8.243',
             'port': 42069,
             'name': 'Main Camera',
             'active': True,
@@ -128,6 +128,82 @@ HTML_TEMPLATE = '''
             background: #666;
             cursor: not-allowed;
         }
+        /* YouTube Links Box Styles */
+        .youtube-links-container {
+            background: #2d2d2d;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            max-width: 800px;
+            margin: 20px auto;
+        }
+        .youtube-links-title {
+            text-align: center;
+            margin-bottom: 15px;
+            font-size: 20px;
+            font-weight: bold;
+            color: #ff4444;
+        }
+        .youtube-links-box {
+            background: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 5px;
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        .youtube-link-item {
+            margin-bottom: 12px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #333;
+        }
+        .youtube-link-item:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+        .youtube-timestamp {
+            color: #888;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .youtube-title {
+            color: #fff;
+            margin-bottom: 6px;
+            font-weight: bold;
+        }
+        .youtube-url {
+            color: #4CAF50;
+            text-decoration: none;
+            word-break: break-all;
+        }
+        .youtube-url:hover {
+            color: #45a049;
+            text-decoration: underline;
+        }
+        .no-links {
+            text-align: center;
+            color: #888;
+            font-style: italic;
+        }
+        .refresh-button {
+            background: #ff4444;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-top: 10px;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .refresh-button:hover {
+            background: #cc0000;
+        }
     </style>
 </head>
 <body>
@@ -159,6 +235,15 @@ HTML_TEMPLATE = '''
         {% endfor %}
     </div>
 
+    <!-- YouTube Links Box -->
+    <div class="youtube-links-container">
+        <div class="youtube-links-title">📹 Uploaded YouTube Videos</div>
+        <div class="youtube-links-box" id="youtube-links-box">
+            <div class="no-links">Loading YouTube links...</div>
+        </div>
+        <button class="refresh-button" onclick="loadYouTubeLinks()">🔄 Refresh List</button>
+    </div>
+
     <script>
         // Store current stream types for each video
         const streamTypes = {};
@@ -168,6 +253,9 @@ HTML_TEMPLATE = '''
             {% for stream_id in config.streams.keys() %}
             initializeStream('{{ stream_id }}', 'mjpg');
             {% endfor %}
+            
+            // Load YouTube links when page loads
+            loadYouTubeLinks();
         }
         
         function initializeStream(streamId, streamType) {
@@ -280,6 +368,54 @@ HTML_TEMPLATE = '''
             // Store the interval ID so we can clear it if needed
             img.dataset.updateInterval = updateInterval;
         }
+        
+        // YouTube Links Functions
+        function loadYouTubeLinks() {
+            const linksBox = document.getElementById('youtube-links-box');
+            linksBox.innerHTML = '<div class="no-links">Loading YouTube links...</div>';
+            
+            fetch('/api/youtube-links')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.links && data.links.length > 0) {
+                        let html = '';
+                        data.links.forEach(link => {
+                            // Parse the link entry (format: [TIMESTAMP] TITLE: URL)
+                            const parts = link.split(': ');
+                            const titleAndTimestamp = parts[0];
+                            const url = parts.slice(1).join(': ');
+                            
+                            // Extract timestamp (between brackets)
+                            const timestampMatch = titleAndTimestamp.match(/\[(.*?)\]/);
+                            const timestamp = timestampMatch ? timestampMatch[1] : 'Unknown time';
+                            const title = titleAndTimestamp.replace(/\[.*?\]\s*/, '');
+                            
+                            html += `
+                                <div class="youtube-link-item">
+                                    <div class="youtube-timestamp">${timestamp}</div>
+                                    <div class="youtube-title">${title}</div>
+                                    <a href="${url}" class="youtube-url" target="_blank">${url}</a>
+                                </div>
+                            `;
+                        });
+                        linksBox.innerHTML = html;
+                    } else {
+                        linksBox.innerHTML = '<div class="no-links">No YouTube videos uploaded yet.</div>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching YouTube links:', error);
+                    linksBox.innerHTML = '<div class="no-links">Error loading YouTube links</div>';
+                });
+        }
+        
+        // Auto-refresh YouTube links every 30 seconds
+        setInterval(loadYouTubeLinks, 30000);
         
         // Clean up intervals when page is unloaded
         window.addEventListener('beforeunload', function() {
@@ -763,6 +899,21 @@ def generate_h264_frames(stream_manager: StreamManager):
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE, config=CONFIG)
+    
+@app.route('/api/youtube-links', methods=['GET'])
+def get_youtube_links():
+    """Get the list of YouTube links from list.txt"""
+    try:
+        links_file = "list.txt"
+        if os.path.exists(links_file):
+            with open(links_file, 'r', encoding='utf-8') as f:
+                links = [line.strip() for line in f.readlines() if line.strip()]
+            return {'links': links}
+        else:
+            return {'links': []}
+    except Exception as e:
+        logger.error(f"Error reading YouTube links: {e}")
+        return {'links': []}
 
 @app.route('/h264_feed/<stream_id>')
 def h264_feed(stream_id):
