@@ -17,8 +17,8 @@ TCP_HOST="0.0.0.0"  # Listen on all interfaces
 TCP_PORT=42069
 
 # Location configuration (Rome, Italy)
-LAT=45.14
-LON=7.38
+LAT=69.420
+LON=42.069
 TIMEZONE="Europe/Rome"
 
 # Buffer times (30 minutes = 0.5 hours in decimal)
