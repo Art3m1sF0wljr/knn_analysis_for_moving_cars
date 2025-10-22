@@ -797,7 +797,7 @@ class StreamManager:
             return None, None
         
         # Convert frame to bytes for streaming to clients
-        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 10])
         frame_bytes = buffer.tobytes()
         
         return frame, frame_bytes
