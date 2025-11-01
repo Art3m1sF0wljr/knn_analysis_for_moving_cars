@@ -1,0 +1,15 @@
+[Unit]
+Description=My Script
+After=network.target vncserver.service
+Requires=vncserver.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:1
+User=art3m1sf0wl
+WorkingDirectory=/home/art3m1sf0wl/program/street_cars
+ExecStart=/bin/bash /home/art3m1sf0wl/program/street_cars/execute.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
