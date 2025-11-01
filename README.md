@@ -7,4 +7,7 @@ app_both does the same as before, with the tcp stream, but also creates a flask 
 app_both and app_42069 work with the picamera that streams with the stream_local.sh<br>
 also this became a surveillance tool kek<br>
 added systemd service<br>
-added logging to both.py
+added logging to both.py<br>
+do write street_cars.service in /etc/systemd/system/street_cars.service<br>
+#systemctl enable street_cars.service<br>
+#systemctl start street_cars.service<br>
