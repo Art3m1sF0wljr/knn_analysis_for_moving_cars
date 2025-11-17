@@ -8,6 +8,8 @@ app_both and app_42069 work with the picamera that streams with the stream_local
 also this became a surveillance tool kek<br>
 added systemd service<br>
 added logging to both.py<br>
+added both_multiple<br>
+which is same as app both but for multiple source streams. also the streams are statically sourced, so when adding a new strem, also modify the javascript<br>
 do write street_cars.service in /etc/systemd/system/street_cars.service<br>
 #systemctl enable street_cars.service<br>
 #systemctl start street_cars.service<br>
